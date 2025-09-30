@@ -3,59 +3,10 @@ import serial.tools.list_ports
 from openpyxl import Workbook, load_workbook
 from datetime import datetime
 import os
-import time
 
 # Konfigurasi default untuk koneksi serial
 BAUD_RATE = 9600
-TIMEOUT = 1
 DATA = 8
-EXCEL_FILE = "pressure_data.xlsx"
-
-def init_excel_file():
-    """
-    Inisialisasi file Excel dengan header jika belum ada
-    """
-    if not os.path.exists(EXCEL_FILE):
-        wb = Workbook()
-        ws = wb.active
-        if ws is not None:
-            ws.title = "Pressure Data"
-            ws.append(["No", "Timestamp", "Port", "Nilai Tekanan (KN)"])
-        wb.save(EXCEL_FILE)
-        print(f"File Excel baru dibuat: {EXCEL_FILE}")
-    else:
-        print(f"Menggunakan file Excel: {EXCEL_FILE}")
-
-def save_to_excel(port, nilai_kn):
-    """
-    Menyimpan data tekanan ke file Excel
-    
-    Args:
-        port (str): Nama port yang digunakan
-        nilai_kn (str): Nilai tekanan yang dibaca
-    """
-    try:
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb.active
-        
-        if ws is None:
-            print("✗ Error: Worksheet tidak ditemukan")
-            return False
-        
-        # Hitung nomor urut (jumlah baris - 1 untuk header)
-        row_number = ws.max_row
-        
-        # Tambahkan data baru
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ws.append([row_number, timestamp, port, nilai_kn])
-        
-        wb.save(EXCEL_FILE)
-        print(f"✓ Data tersimpan ke Excel (Baris {row_number + 1}): {nilai_kn} KN")
-        return True
-        
-    except Exception as e:
-        print(f"✗ Error menyimpan ke Excel: {e}")
-        return False
 
 def list_com_ports():
     """
@@ -92,7 +43,7 @@ def koneksi(port, baud=BAUD_RATE, data=DATA):
         str: Status koneksi
     """
     try:
-        ser = serial.Serial(port, baud, data, timeout=TIMEOUT)
+        ser = serial.Serial(port, baud, data, timeout=None)
         if ser.is_open:
             print(f"Berhasil terhubung ke {port}")
             ser.close()
@@ -104,304 +55,409 @@ def koneksi(port, baud=BAUD_RATE, data=DATA):
         print(f"Error connecting to {port}: {pesanError}")
         return f"Error: {pesanError}"
 
-def nilaiTekan(port, baud=BAUD_RATE, data=DATA):
+def input_manual_ke_excel(excel_file="pressure_data_manual.xlsx"):
     """
-    Membaca nilai tekanan dari perangkat serial
+    Menerima input nilai kN secara manual dan menyimpan ke Excel
+    
+    Args:
+        excel_file (str): Nama file Excel untuk menyimpan data
+    """
+    try:
+        print(f"\n{'='*60}")
+        print("MODE INPUT MANUAL")
+        print(f"{'='*60}")
+        print(f"Data akan disimpan ke: {excel_file}")
+        print("Ketik 'selesai' atau tekan Ctrl+C untuk berhenti")
+        print(f"{'='*60}\n")
+        
+        # Buat atau load Excel workbook
+        if os.path.exists(excel_file):
+            wb = load_workbook(excel_file)
+            ws = wb.active
+            print(f"File Excel '{excel_file}' ditemukan, melanjutkan data...")
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Pressure Data Manual"
+            # Header
+            ws.append(["No", "Timestamp", "Nilai KN", "Keterangan"])
+            wb.save(excel_file)
+            print(f"File Excel '{excel_file}' dibuat baru")
+        
+        counter = ws.max_row if ws.max_row > 1 else 1
+        
+        while True:
+            try:
+                # Input nilai kN
+                input_nilai = input(f"\n[Data #{counter}] Masukkan nilai kN: ").strip()
+                
+                # Cek jika user ingin keluar
+                if input_nilai.lower() in ['selesai', 'exit', 'quit', 'keluar']:
+                    print("\nProses input manual dihentikan")
+                    break
+                
+                # Validasi input adalah angka
+                try:
+                    nilaiKN = float(input_nilai)
+                except ValueError:
+                    print("⚠ Input harus berupa angka! Coba lagi.")
+                    continue
+                
+                # Input keterangan (opsional)
+                keterangan = input("   Keterangan (opsional, tekan Enter untuk skip): ").strip()
+                if not keterangan:
+                    keterangan = "Input manual"
+                
+                # Timestamp
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Konversi nilai KN ke format koma
+                nilaiKN_format = str(nilaiKN).replace('.', ',')
+                
+                # Simpan ke Excel
+                ws.append([counter, timestamp, nilaiKN_format, keterangan])
+                wb.save(excel_file)
+                
+                print(f"✓ Data #{counter} tersimpan: {nilaiKN_format} kN")
+                print("-" * 60)
+                counter += 1
+                
+            except KeyboardInterrupt:
+                print("\n\nProses dihentikan oleh user")
+                break
+            except Exception as e:
+                print(f"⚠ Error: {e}")
+                continue
+        
+        # Tutup workbook
+        wb.close()
+        print(f"\n✓ Total data tersimpan: {counter - 1}")
+        print(f"✓ File Excel: {excel_file}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+
+def baca_dan_simpan_ke_excel(port, baud=BAUD_RATE, data=DATA, excel_file="pressure_data.xlsx"):
+    """
+    Membaca nilai tekanan dari perangkat serial secara terus-menerus
+    dan menyimpan ke Excel per baris tanpa timeout.
+    Memungkinkan input manual dengan mengetik 'm <nilai>' atau 'm' saja
     
     Args:
         port (str): Nama port (misal: 'COM3' atau '/dev/ttyUSB0')
         baud (int): Baud rate (default: 9600)
         data (int): Data bits (default: 8)
-    
-    Returns:
-        str: Nilai tekanan yang dibaca dari perangkat, atau None jika gagal
+        excel_file (str): Nama file Excel untuk menyimpan data
     """
+    import threading
+    import queue
+    
     try:
-        ser = serial.Serial(port, baud, data, timeout=TIMEOUT)
-        if ser.is_open:
-            print(f"Membaca data dari {port}...")
-            print(ser)
-            nilaiKN = ""
-            
-            while True:
+        # Buka koneksi serial dengan timeout
+        ser = serial.Serial(port, baud, data, timeout=0.5)
+        
+        if not ser.is_open:
+            print("Gagal membuka port")
+            return
+        
+        print(f"Terhubung ke {port}")
+        print(f"Baud rate: {baud}")
+        print(f"Data akan disimpan ke: {excel_file}")
+        print("=" * 60)
+        
+        # Buat atau load Excel workbook
+        if os.path.exists(excel_file):
+            wb = load_workbook(excel_file)
+            ws = wb.active
+            print(f"File Excel '{excel_file}' ditemukan, melanjutkan data...")
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Pressure Data"
+            # Header
+            ws.append(["No", "Timestamp", "Nilai KN", "Sumber", "Raw Data/Keterangan"])
+            wb.save(excel_file)
+            print(f"File Excel '{excel_file}' dibuat baru")
+        
+        print("\nMulai membaca data...")
+        print("Ketik 'm <nilai>' (contoh: m 25.5) atau 'm' saja lalu Enter untuk input manual")
+        print("Tekan Ctrl+C untuk menghentikan\n")
+        
+        counter = ws.max_row if ws.max_row > 1 else 1
+        
+        # Queue untuk komunikasi antara thread
+        input_queue = queue.Queue()
+        stop_event = threading.Event()
+        
+        def read_input():
+            """Thread untuk membaca input keyboard"""
+            while not stop_event.is_set():
+                try:
+                    user_input = input()
+                    input_queue.put(user_input)
+                except:
+                    break
+        
+        # Start thread untuk input
+        input_thread = threading.Thread(target=read_input, daemon=True)
+        input_thread.start()
+        
+        while True:
+            try:
+                # Cek apakah ada input manual dari user
+                try:
+                    user_input = input_queue.get_nowait()
+                    user_input = user_input.strip()
+                    
+                    # Cek jika input dimulai dengan 'm' atau 'manual'
+                    if user_input.lower().startswith('m'):
+                        parts = user_input.split(maxsplit=1)
+                        
+                        # Jika ada nilai langsung setelah 'm' (contoh: m 25.5)
+                        if len(parts) > 1:
+                            try:
+                                nilaiKN = float(parts[1])
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                
+                                # Konversi nilai KN ke format koma
+                                nilaiKN_format = str(nilaiKN).replace('.', ',')
+                                
+                                # Simpan ke Excel
+                                ws.append([counter, timestamp, nilaiKN_format, "MANUAL", "Input cepat"])
+                                wb.save(excel_file)
+                                
+                                print(f"✓ Data #{counter} tersimpan: {nilaiKN_format} kN (MANUAL)")
+                                print("-" * 40)
+                                counter += 1
+                                
+                            except ValueError:
+                                print(f"⚠ Nilai tidak valid: '{parts[1]}' - gunakan format: m <angka>")
+                        
+                        # Jika hanya 'm' tanpa nilai, masuk mode input detail
+                        else:
+                            print("\n" + "="*60)
+                            print("MODE INPUT MANUAL")
+                            print("="*60)
+                            
+                            # Input nilai kN
+                            while True:
+                                try:
+                                    nilai_input = input(f"[Data #{counter}] Masukkan nilai kN: ").strip()
+                                    
+                                    if nilai_input.lower() in ['batal', 'cancel']:
+                                        print("Input manual dibatalkan\n")
+                                        break
+                                    
+                                    nilaiKN = float(nilai_input)
+                                    
+                                    # Input keterangan
+                                    keterangan = input("   Keterangan (Enter untuk skip): ").strip()
+                                    if not keterangan:
+                                        keterangan = "Input manual"
+                                    
+                                    # Timestamp
+                                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    
+                                    # Konversi nilai KN ke format koma
+                                    nilaiKN_format = str(nilaiKN).replace('.', ',')
+                                    
+                                    # Simpan ke Excel
+                                    ws.append([counter, timestamp, nilaiKN_format, "MANUAL", keterangan])
+                                    wb.save(excel_file)
+                                    
+                                    print(f"✓ Data #{counter} tersimpan: {nilaiKN_format} kN (MANUAL)")
+                                    print("="*60 + "\n")
+                                    counter += 1
+                                    break
+                                    
+                                except ValueError:
+                                    print("⚠ Input harus berupa angka! (atau ketik 'batal' untuk keluar)")
+                                    continue
+                                except Exception as e:
+                                    print(f"⚠ Error: {e}")
+                                    break
+                            
+                            print("Kembali ke mode otomatis...\n")
+                            print("Ketik 'm <nilai>' atau 'm' lalu Enter untuk input manual lagi")
+                        
+                except queue.Empty:
+                    pass
+                
+                # Baca data dari serial
                 if datanya := ser.readline():
                     data_str = datanya.decode("utf-8", errors="ignore").strip()
-                    print(f"Data diterima: {data_str}")  # Debug print
                     
-                    if "ovalue" in data_str.lower():
-                        try:
-                            nilaiKN = data_str.split()[1]
-                            ser.close()
-                            print(f"Nilai Tekan: {nilaiKN}")
-                            return nilaiKN
-                        except IndexError:
-                            print("Format data tidak sesuai, mencoba lagi...")
-                            continue
-                else:
-                    print("Tidak ada data yang diterima, timeout...")
-                    break
-            
-            ser.close()
-            return None
-            
+                    if data_str:  # Jika ada data
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Raw: {data_str}")
+                        
+                        # Cek apakah data mengandung "ovalue"
+                        if "ovalue" in data_str.lower():
+                            try:
+                                # Extract nilai KN
+                                parts = data_str.split()
+                                if len(parts) >= 2:
+                                    nilaiKN_raw = parts[1]
+                                    # Ganti koma dengan titik untuk konversi ke float
+                                    nilaiKN = nilaiKN_raw.replace(',', '.')
+                                    
+                                    # Konversi ke format koma untuk Excel
+                                    nilaiKN_format = nilaiKN.replace('.', ',')
+                                    
+                                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    
+                                    # Simpan ke Excel
+                                    ws.append([counter, timestamp, nilaiKN_format, "SERIAL", data_str])
+                                    wb.save(excel_file)
+                                    
+                                    print(f"✓ Data #{counter} tersimpan: {nilaiKN_format} KN (SERIAL)")
+                                    print("-" * 60)
+                                    counter += 1
+                                else:
+                                    print("⚠ Format data tidak lengkap, menunggu data berikutnya...")
+                                    
+                            except Exception as e:
+                                print(f"⚠ Error parsing data: {e}")
+                                continue
+                        
+            except KeyboardInterrupt:
+                print("\n\nProses dihentikan oleh user")
+                stop_event.set()
+                break
+            except Exception as e:
+                print(f"⚠ Error: {e}")
+                continue
+        
+        # Tutup koneksi
+        ser.close()
+        wb.close()
+        stop_event.set()
+        print(f"\n✓ Koneksi ditutup")
+        print(f"✓ Total data tersimpan: {counter - 1}")
+        print(f"✓ File Excel: {excel_file}")
+        
     except Exception as e:
         pesanError = str(e)
-        print(f"Error reading pressure value: {pesanError}")
-        return None
+        print(f"Error: {pesanError}")
 
-def continuous_reading_mode():
+def pilih_port_dan_mulai_logging():
     """
-    Mode pembacaan kontinyu dengan auto-save ke Excel
+    Memungkinkan pengguna memilih port untuk logging ke Excel
     """
     ports = list_com_ports()
     
     if not ports:
         return
     
-    print(f"\nFound {len(ports)} COM ports")
-    print("Select a port for continuous reading:")
+    print(f"\nDitemukan {len(ports)} COM ports")
+    print("Pilih port untuk logging data:")
     
     for i, port in enumerate(ports, 1):
         print(f"{i}. {port}")
     
     try:
-        choice = int(input("Enter port number (or 0 to cancel): "))
+        choice = int(input("\nMasukkan nomor port (atau 0 untuk keluar): "))
         
         if choice == 0:
-            print("Cancelled...")
+            print("Keluar...")
             return
         
         if 1 <= choice <= len(ports):
             selected_port = ports[choice - 1]
             
-            # Konfigurasi interval pembacaan
-            try:
-                interval = input("Enter reading interval in seconds (default 2): ").strip()
-                interval = float(interval) if interval else 2.0
-            except ValueError:
-                print("Invalid interval, using default 2 seconds")
-                interval = 2.0
+            # Input nama file Excel
+            excel_file = input("\nNama file Excel (tekan Enter untuk 'pressure_data.xlsx'): ").strip()
+            if not excel_file:
+                excel_file = "pressure_data.xlsx"
+            
+            if not excel_file.endswith('.xlsx'):
+                excel_file += '.xlsx'
+            
+            # Input baud rate (opsional)
+            baud_input = input(f"Baud rate (tekan Enter untuk {BAUD_RATE}): ").strip()
+            baud = int(baud_input) if baud_input else BAUD_RATE
             
             print(f"\n{'='*60}")
-            print(f"Mode Pembacaan Kontinyu Aktif")
             print(f"Port: {selected_port}")
-            print(f"Interval: {interval} detik")
-            print(f"Data akan disimpan ke: {EXCEL_FILE}")
-            print(f"Ketik 'exit' dan tekan Enter untuk berhenti")
+            print(f"Baud rate: {baud}")
+            print(f"File Excel: {excel_file}")
             print(f"{'='*60}\n")
             
-            # Inisialisasi file Excel
-            init_excel_file()
-            
-            reading_count = 0
-            
-            try:
-                while True:
-                    # Cek input user (non-blocking)
-                    import sys
-                    import select
-                    
-                    # Untuk Windows
-                    if sys.platform == 'win32':
-                        import msvcrt
-                        if msvcrt.kbhit():
-                            user_input = input().strip().lower()
-                            if user_input == 'exit':
-                                print("\n✓ Pembacaan dihentikan oleh user")
-                                print(f"Total pembacaan: {reading_count}")
-                                break
-                    else:
-                        # Untuk Linux/Mac
-                        i, o, e = select.select([sys.stdin], [], [], 0.1)
-                        if i:
-                            user_input = sys.stdin.readline().strip().lower()
-                            if user_input == 'exit':
-                                print("\n✓ Pembacaan dihentikan oleh user")
-                                print(f"Total pembacaan: {reading_count}")
-                                break
-                    
-                    # Baca nilai tekanan
-                    reading_count += 1
-                    print(f"\n[Pembacaan #{reading_count}] {datetime.now().strftime('%H:%M:%S')}")
-                    
-                    nilai = nilaiTekan(selected_port)
-                    
-                    if nilai:
-                        save_to_excel(selected_port, nilai)
-                    else:
-                        print("✗ Gagal membaca nilai tekanan, mencoba lagi...")
-                    
-                    # Tunggu sebelum pembacaan berikutnya
-                    print(f"Menunggu {interval} detik... (ketik 'exit' untuk berhenti)")
-                    time.sleep(interval)
-                    
-            except KeyboardInterrupt:
-                print("\n\n✓ Pembacaan dihentikan oleh user (Ctrl+C)")
-                print(f"Total pembacaan: {reading_count}")
-            except Exception as e:
-                print(f"\nError: {e}")
-                print(f"Total pembacaan: {reading_count}")
-                
+            # Mulai logging
+            baca_dan_simpan_ke_excel(selected_port, baud, DATA, excel_file)
         else:
-            print("Invalid selection!")
+            print("Pilihan tidak valid!")
             
     except ValueError:
-        print("Please enter a valid number!")
+        print("Masukkan nomor yang valid!")
     except KeyboardInterrupt:
-        print("\n\n✓ Pembacaan dihentikan oleh user (Ctrl+C)")
+        print("\nOperasi dibatalkan oleh user.")
 
-def test_all_ports():
+def menu_input_data():
     """
-    Menguji koneksi ke semua port yang tersedia
+    Menu untuk memilih mode input: Serial Port (otomatis + manual) atau Manual saja
     """
-    print("Testing all available ports...\n")
-    ports = list_com_ports()
-    
-    if not ports:
-        return
-    
-    print("\nTesting connections:")
-    print("=" * 50)
-    
-    for port in ports:
-        print(f"Testing {port}...")
-        status = koneksi(port)
-        print(f"Status: {status}")
-        print("-" * 30)
-
-def connect_to_specific_port():
-    """
-    Memungkinkan pengguna memilih port tertentu untuk koneksi
-    """
-    ports = list_com_ports()
-    
-    if not ports:
-        return
-    
-    print(f"\nFound {len(ports)} COM ports")
-    print("Select a port to connect:")
-    
-    for i, port in enumerate(ports, 1):
-        print(f"{i}. {port}")
+    print("\n" + "="*60)
+    print("PILIH MODE INPUT DATA")
+    print("="*60)
+    print("1. Dari Serial Port (otomatis + dapat input manual)")
+    print("2. Input Manual saja (tanpa serial)")
+    print("0. Kembali ke menu utama")
     
     try:
-        choice = int(input("Enter port number (or 0 to exit): "))
+        choice = input("\nPilih mode (0-2): ").strip()
         
-        if choice == 0:
-            print("Exiting...")
+        if choice == '1':
+            pilih_port_dan_mulai_logging()
+        elif choice == '2':
+            # Input nama file Excel untuk manual input
+            excel_file = input("\nNama file Excel (tekan Enter untuk 'pressure_data_manual.xlsx'): ").strip()
+            if not excel_file:
+                excel_file = "pressure_data_manual.xlsx"
+            
+            if not excel_file.endswith('.xlsx'):
+                excel_file += '.xlsx'
+            
+            input_manual_ke_excel(excel_file)
+        elif choice == '0':
             return
-        
-        if 1 <= choice <= len(ports):
-            selected_port = ports[choice - 1]
-            print(f"\nConnecting to {selected_port}...")
-            status = koneksi(selected_port)
-            print(f"Connection status: {status}")
         else:
-            print("Invalid selection!")
+            print("Opsi tidak valid!")
             
-    except ValueError:
-        print("Please enter a valid number!")
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-
-def read_pressure_from_port():
-    """
-    Memungkinkan pengguna memilih port untuk membaca nilai tekanan sekali
-    """
-    ports = list_com_ports()
-    
-    if not ports:
-        return
-    
-    print(f"\nFound {len(ports)} COM ports")
-    print("Select a port to read pressure value:")
-    
-    for i, port in enumerate(ports, 1):
-        print(f"{i}. {port}")
-    
-    try:
-        choice = int(input("Enter port number (or 0 to exit): "))
-        
-        if choice == 0:
-            print("Exiting...")
-            return
-        
-        if 1 <= choice <= len(ports):
-            selected_port = ports[choice - 1]
-            print(f"\nReading pressure from {selected_port}...")
-            
-            nilai = nilaiTekan(selected_port)
-            
-            if nilai:
-                print(f"✓ Berhasil membaca nilai tekanan: {nilai}")
-                
-                # Tanya apakah ingin menyimpan ke Excel
-                save_choice = input("Simpan ke Excel? (y/n): ").strip().lower()
-                if save_choice == 'y':
-                    init_excel_file()
-                    save_to_excel(selected_port, nilai)
-            else:
-                print("✗ Gagal membaca nilai tekanan")
-        else:
-            print("Invalid selection!")
-            
-    except ValueError:
-        print("Please enter a valid number!")
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
+        print("\nOperasi dibatalkan oleh user.")
 
 # Main program
 if __name__ == "__main__":
     print("=" * 60)
-    print("Serial Port Manager dengan Excel Data Logging")
+    print("Serial Port Pressure Logger to Excel")
     print("=" * 60)
     
     while True:
-        print("\n" + "=" * 60)
-        print("Menu Utama:")
-        print("=" * 60)
-        print("1. List all COM ports")
-        print("2. Test all ports")
-        print("3. Connect to specific port")
-        print("4. Read pressure value (single)")
-        print("5. Continuous reading mode (AUTO-SAVE to Excel)")
-        print("6. Exit")
-        print("=" * 60)
+        print("\nMenu:")
+        print("1. Lihat daftar COM ports")
+        print("2. Mulai logging/input data ke Excel")
+        print("3. Keluar")
         
         try:
-            choice = input("Pilih opsi (1-6) atau ketik 'exit': ").strip().lower()
+            choice = input("\nPilih opsi (1-3): ").strip()
             
-            if choice == 'exit' or choice == '6':
-                print("\n" + "=" * 60)
-                print("Terima kasih! Program selesai.")
-                print("=" * 60)
-                break
-                
-            elif choice == '1':
+            if choice == '1':
                 print()
                 ports = list_com_ports()
-                print(f"\nFound {len(ports)} COM ports: {ports}")
+                print(f"\nDitemukan {len(ports)} COM ports")
                 
             elif choice == '2':
-                print()
-                test_all_ports()
+                menu_input_data()
                 
             elif choice == '3':
-                connect_to_specific_port()
-                
-            elif choice == '4':
-                read_pressure_from_port()
-                
-            elif choice == '5':
-                continuous_reading_mode()
+                print("Terima kasih!")
+                break
                 
             else:
-                print("Opsi tidak valid! Pilih 1-6 atau ketik 'exit'.")
+                print("Opsi tidak valid! Pilih 1-3.")
                 
         except KeyboardInterrupt:
-            print("\n\n" + "=" * 60)
-            print("Program dihentikan oleh user (Ctrl+C)")
-            print("=" * 60)
+            print("\n\nProgram dihentikan. Terima kasih!")
             break
         except Exception as e:
             print(f"Terjadi error: {e}")
